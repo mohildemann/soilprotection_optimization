@@ -1,0 +1,157 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+# set library path: .libPaths(c("C:/Users/morit/rprojects/libsR411"))
+# set working directory: setwd("C:/Users/morit/rprojects/draw_realizations")
+
+```{r}
+library(sp)
+library(sf)
+library(raster)
+library(rtop)
+library(rgdal)
+library(RandomFields)
+library(data.table)
+```
+
+```{r}
+#input debre markos
+historical_precipitation_tif <- raster("historical_precipitation_debre_markos_reprojected.tif")
+historical_precipitation_grid = as(historical_precipitation_tif, "SpatialGridDataFrame")
+historical_precipitation_sgdf <-  as(historical_precipitation_grid, "SpatialPolygonsDataFrame")
+
+observations = historical_precipitation_sgdf
+observations$obs = observations@data$historical_precipitation_debre_markos_reprojected
+
+spplot(observations)
+
+predictionLocations_tif <- raster('prediction_location_raster.tif')
+predictionLocations_grid = as(predictionLocations_tif, "SpatialGridDataFrame")
+predictionLocations_spdf <-  as(predictionLocations_grid, "SpatialPolygonsDataFrame")
+predictionLocations_spdf@proj4string = crs(historical_precipitation_tif)
+```
+```{r}
+#input gumobila
+historical_precipitation_tif <- raster("precipitation_gumobila_large.tif")
+historical_precipitation_grid = as(historical_precipitation_tif, "SpatialGridDataFrame")
+historical_precipitation_sgdf <-  as(historical_precipitation_grid, "SpatialPolygonsDataFrame")
+
+observations = historical_precipitation_sgdf
+observations$obs = observations@data$precipitation_gumobila_large
+
+spplot(observations)
+
+predictionLocations_tif <- raster('prediction_location_raster_gumobila2.tif')
+predictionLocations_grid = as(predictionLocations_tif, "SpatialGridDataFrame")
+predictionLocations_spdf <-  as(predictionLocations_grid, "SpatialPolygonsDataFrame")
+predictionLocations_spdf@proj4string = crs(historical_precipitation_tif)
+spplot(predictionLocations_tif)
+```
+
+```{r}
+#rtop model with exponential varigram function
+params = list(gDist = TRUE, cloud = TRUE, model = "Exp")
+rtopObjExp = createRtopObject(observations, predictionLocations_spdf,
+params = params)
+rtopObjExp = rtopVariogram(rtopObjExp)
+rtopObjExp = rtopFitVariogram(rtopObjExp)
+```
+
+```{r}
+rtopObjExp = rtopKrige(rtopObjExp)
+```
+
+
+```{r}
+#enerata
+#kriged_original_observations = copy(predictionLocations_r)
+#kriged_original_observations@data@values <- rtopObjExp$predictions$var1.pred
+#kriged_original_observations@crs = crs(predictionLocations_r)
+#writeRaster(kriged_original_observations,"simulated_precipitation_cond_simulation\\enerata\\kriged_from_observations.tif",options=c('TFW=YES'), overwrite =TRUE)
+
+#gumobila
+predictionLocations_r = copy(predictionLocations_tif)
+kriged_original_observations = copy(predictionLocations_r)
+kriged_original_observations@data@values <- rtopObjExp$predictions$var1.pred
+kriged_original_observations@crs = crs(predictionLocations_r)
+writeRaster(kriged_original_observations,"simulated_precipitation_cond_simulation\\gumobila\\kriged_from_observations.tif",options=c('TFW=YES'), overwrite =TRUE)
+```
+
+
+```{r}
+#define area for simulation, needs to be a square covering the histprical precipitation dataset
+#enerata
+#x <- seq(295252.9758953849086538, 443455.7256789821549319, 91.6950673554)
+#y <- seq(1082697.0490040949080139, 1230899.7987876921633849, 91.6950673554)
+
+#gumobila
+x <- seq(230538, 356785, 100)
+y <- seq(1147201, 1273448, 100)
+
+#for loop
+for(i in 0:1){
+
+RFoptions(seed=i) 
+
+#creating unconditional simulation
+#parameters from rtop object are sill, range, nugget
+#results from exponentional variogram model of study area enerata : 
+#sill=1.787925e+05 range=5.809280e+05 nugget=4.477239e+19
+
+#results from exponentional variogram model of study area gumobila : 
+#sill=2.85e+05 range=5.42e+05 nugget=2.65e+20
+#translated to RandomFields parameters: range = scale, var = sill
+
+#model enerata:
+#model = RPtbm(RMexp(scale=5.809280e+05, var=1.787925e+05))
+
+#model gumobila:
+model = RPtbm(RMexp(scale=5.42e+05, var=2.85e+05))
+
+unconditional_simulation <- RFsimulate(model, x=x, y=y, spConform=FALSE)
+#raster conversion
+unconditional_simulation_r <- raster(unconditional_simulation)
+unconditional_simulation_r@crs = crs(predictionLocations_r)
+extent(unconditional_simulation_r) <- extent( historical_precipitation_tif)
+
+#resample to grid of observation data (historical precipitation)
+unconditional_simulation_resampled <- resample(unconditional_simulation_r, historical_precipitation_tif, method="bilinear")
+unconditional_simulation_resampled@crs = crs(predictionLocations_r)
+
+#rtop model of unconditional simulation
+unconditional_simulation_resampled@crs = crs(predictionLocations_r)
+simulation_observations = as(unconditional_simulation_resampled, "SpatialPolygonsDataFrame")
+simulation_observations$obs = simulation_observations@data$precipitation_gumobila_large
+
+#simulation_observations@proj4string = crs(historical_precipitation_tif)
+simulation_observations$obs = unconditional_simulation_resampled@data@values
+params = list(gDist = TRUE, cloud = TRUE, model = "Exp")
+
+#irgendwas ist falsch, die gekrigden werte sind alle gleich
+rtopObjSim = createRtopObject(simulation_observations, predictionLocations_spdf,
+params = params)
+rtopObjSim = rtopVariogram(rtopObjSim)
+rtopObjSim = rtopFitVariogram(rtopObjSim)
+rtopObjSim = rtopKrige(rtopObjSim)
+
+unconditional_simulation_r@crs = crs(predictionLocations_r)
+writeRaster(unconditional_simulation_r,gsub(" ", "",paste("simulated_precipitation_cond_simulation\\gumobila\\simvalues_",i,".tif")),options=c('TFW=YES'), overwrite =TRUE)
+unconditional_simulation_resampled@crs = crs(predictionLocations_r)
+writeRaster(unconditional_simulation_resampled,gsub(" ", "",paste("simulated_precipitation_cond_simulation\\gumobila\\simvalues_observed_",i,".tif")),options=c('TFW=YES'), overwrite =TRUE)
+
+kriged_from_simulated_obersations = copy(predictionLocations_r)
+kriged_from_simulated_obersations@data@values <- rtopObjSim$predictions$var1.pred
+kriged_from_simulated_obersations@crs = crs(predictionLocations_r)
+writeRaster(kriged_from_simulated_obersations,gsub(" ", "",paste("simulated_precipitation_cond_simulation\\gumobila\\kriged_from_simvalues_",i,".tif")),options=c('TFW=YES'), overwrite =TRUE)
+
+#bring to same extent
+sim_cropped = crop(unconditional_simulation_r,extent(kriged_from_simulated_obersations))
+extent(sim_cropped) = extent(kriged_from_simulated_obersations)
+conditioned_by_kriging <- kriged_original_observations + (sim_cropped - kriged_from_simulated_obersations)
+conditioned_by_kriging@crs = crs(predictionLocations_r)
+writeRaster(conditioned_by_kriging,gsub(" ", "",paste("simulated_precipitation_cond_simulation\\gumobila\\conditioned_by_kriging_",i,".tif")),options=c('TFW=YES'),prj = True, overwrite =TRUE)
+rm(rtopObjSim,unconditional_simulation)
+gc()
+}
+```
